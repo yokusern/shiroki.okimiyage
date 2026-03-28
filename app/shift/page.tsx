@@ -88,67 +88,141 @@ export default function ShiftPage() {
     if (!textInput.trim()) return;
 
     setIsAnalyzing(true);
-    // Simulate smart analysis for UX
     await new Promise(r => setTimeout(r, 600));
 
     const lines = textInput.split('\n').map(l => l.trim()).filter(l => l !== '');
-    let currentHeaderDate: string | null = null;
     const newLogs: LogEntry[] = [];
     const updatedShifts = [...shifts];
     const newHighlighted = new Set<string>();
 
+    let currentStaffName: string | null = null;
+    let currentHeaderDate: string | null = null;
+    let firstDetectedDate: string | null = null;
+
     lines.forEach(line => {
-      // 1. Date Header Detection (e.g. "3/28" or "03/28")
+      // 1. Staff Header Detection (e.g. "16:31 凛 藤川凛" or "堀田渓介")
+      const timeNameMatch = line.match(/^(\d{1,2}:\d{2})\s+(.+)$/);
+      if (timeNameMatch) {
+        const rawName = timeNameMatch[2].trim();
+        const parts = rawName.split(/\s+/);
+        // Take the last part as the real name if multiple parts exist
+        currentStaffName = parts.length > 1 ? parts[parts.length - 1] : parts[0];
+        // Clean up any remaining trailing text like "よろしく..." if it got caught
+        currentStaffName = currentStaffName.replace(/[よろしく更新変りました]/g, '').trim();
+        return;
+      }
+
+      // If a line is just a name like "篠塚昇太 篠塚昇太"
+      if (!line.match(/^\d+日/) && !line.match(/\d\/\d/) && line.length > 1 && line.length < 20 && !line.includes('よろしく')) {
+        const parts = line.split(/\s+/);
+        const nameCandidate = parts.length > 1 ? parts[parts.length - 1] : parts[0];
+        if (!nameCandidate.match(/^\d{4}/)) { // Skip date lines like 2026.03.26
+          currentStaffName = nameCandidate;
+          return;
+        }
+      }
+
+      // 2. Date Header Detection (e.g. "3/28")
       const dateHeaderMatch = line.match(/^(\d{1,2})\/(\d{1,2})$/);
       if (dateHeaderMatch) {
         currentHeaderDate = `${new Date().getFullYear()}-${dateHeaderMatch[1].padStart(2, '0')}-${dateHeaderMatch[2].padStart(2, '0')}`;
         return;
       }
 
-      // 2. Inline Date & Time & Name Detection
-      const inlineDateMatch = line.match(/(\d{1,2})\/(\d{1,2})/);
-      const timeMatch = line.match(/(\d{1,2}(?::\d{2})?)\s*-\s*(\d{1,2}(?::\d{2})?)/);
+      // 3. Date with Day Pattern (e.g. "6日(月)")
+      const dateDayMatch = line.match(/^(\d{1,2})日\s*[\(（][月火水木金土日][\)）]/);
+      const timeRangeMatch = line.match(/(\d{1,2}(?:\.\d)?(?::\d{2})?)\s*-\s*(\d{1,2}(?:\.\d)?(?::\d{2})?)/);
 
-      let targetDate = currentHeaderDate;
-      if (inlineDateMatch) {
-        targetDate = `${new Date().getFullYear()}-${inlineDateMatch[1].padStart(2, '0')}-${inlineDateMatch[2].padStart(2, '0')}`;
-      }
-
-      if (targetDate && timeMatch) {
-        let name = line;
-        if (inlineDateMatch) name = name.replace(inlineDateMatch[0], '');
-        name = name.replace(timeMatch[0], '')
-                   .replace(/[\(\)（）月火水木金土日]/g, ' ')
-                   .replace(/\s+/g, ' ')
-                   .trim();
+      if (dateDayMatch && currentStaffName) {
+        const day = dateDayMatch[1].padStart(2, '0');
+        const now = new Date();
+        let month = now.getMonth() + 1;
+        let year = now.getFullYear();
         
-        if (name) {
-          const shiftId = `${name}-${targetDate}`;
-          const timeValue = timeMatch[0];
+        // Context-aware month selection:
+        // If the day is small (e.g. 6th) and today is late in the month (e.g. 28th), assume next month.
+        if (Number(day) < now.getDate() - 5) {
+          month += 1;
+          if (month > 12) { month = 1; year += 1; }
+        }
+        
+        const targetDate = `${year}-${String(month).padStart(2, '0')}-${day}`;
+        if (!firstDetectedDate || targetDate < firstDetectedDate) firstDetectedDate = targetDate;
+
+        if (timeRangeMatch) {
+          // Normalize decimal times (e.g. 18.5 -> 18:30)
+          const normalizeTime = (t: string) => {
+            if (t.includes('.')) {
+              const [h, f] = t.split('.');
+              return `${h.padStart(2, '0')}:${f === '5' ? '30' : '00'}`;
+            }
+            if (!t.includes(':')) return `${t.padStart(2, '0')}:00`;
+            return t.padStart(5, '0');
+          };
+          
+          const timeValue = `${normalizeTime(timeRangeMatch[1])}-${normalizeTime(timeRangeMatch[2])}`;
+          const shiftId = `${currentStaffName}-${targetDate}`;
           const existingIndex = updatedShifts.findIndex(s => s.id === shiftId);
 
           if (existingIndex > -1) {
             if (updatedShifts[existingIndex].time !== timeValue) {
               updatedShifts[existingIndex].time = timeValue;
-              newLogs.push({ id: Math.random().toString(), message: `Updated: ${name} on ${formatDateShort(targetDate)}`, type: 'update' });
+              newLogs.push({ id: Math.random().toString(), message: `Updated: ${currentStaffName} on ${formatDateShort(targetDate)}`, type: 'update' });
               newHighlighted.add(shiftId);
             }
           } else {
-            updatedShifts.push({ id: shiftId, name, date: targetDate, time: timeValue });
-            newLogs.push({ id: Math.random().toString(), message: `Added: ${name} on ${formatDateShort(targetDate)}`, type: 'insert' });
+            updatedShifts.push({ id: shiftId, name: currentStaffName, date: targetDate, time: timeValue });
+            newLogs.push({ id: Math.random().toString(), message: `Added: ${currentStaffName} on ${formatDateShort(targetDate)}`, type: 'insert' });
+            newHighlighted.add(shiftId);
+          }
+        }
+        return;
+      }
+
+      // 4. Fallback for older inline patterns
+      const inlineDateMatch = line.match(/(\d{1,2})\/(\d{1,2})/);
+      const fallbackTimeMatch = line.match(/(\d{1,2}(?::\d{2})?)\s*-\s*(\d{1,2}(?::\d{2})?)/);
+
+      let targetDateFallback = currentHeaderDate;
+      if (inlineDateMatch) {
+        targetDateFallback = `${new Date().getFullYear()}-${inlineDateMatch[1].padStart(2, '0')}-${inlineDateMatch[2].padStart(2, '0')}`;
+      }
+
+      if (targetDateFallback && fallbackTimeMatch) {
+        let name = line;
+        if (inlineDateMatch) name = name.replace(inlineDateMatch[0], '');
+        name = name.replace(fallbackTimeMatch[0], '')
+                   .replace(/[\(\)（）月火水木金土日]/g, ' ')
+                   .replace(/\s+/g, ' ')
+                   .trim();
+        
+        const nameToUse = name || currentStaffName;
+        if (nameToUse) {
+          const timeValue = fallbackTimeMatch[0];
+          const shiftId = `${nameToUse}-${targetDateFallback}`;
+          const existingIndex = updatedShifts.findIndex(s => s.id === shiftId);
+
+          if (existingIndex > -1) {
+            if (updatedShifts[existingIndex].time !== timeValue) {
+              updatedShifts[existingIndex].time = timeValue;
+              newLogs.push({ id: Math.random().toString(), message: `Updated: ${nameToUse} on ${formatDateShort(targetDateFallback)}`, type: 'update' });
+              newHighlighted.add(shiftId);
+            }
+          } else {
+            updatedShifts.push({ id: shiftId, name: nameToUse, date: targetDateFallback, time: timeValue });
+            newLogs.push({ id: Math.random().toString(), message: `Added: ${nameToUse} on ${formatDateShort(targetDateFallback)}`, type: 'insert' });
             newHighlighted.add(shiftId);
           }
         }
       }
     });
 
+    if (firstDetectedDate) setStartDate(firstDetectedDate);
     setShifts(updatedShifts);
     setLogs(prev => [...prev, ...newLogs]);
     setHighlightedCells(newHighlighted);
     setTextInput('');
     setIsAnalyzing(false);
-
-    // Clear highlights after 2 seconds
     setTimeout(() => setHighlightedCells(new Set()), 2000);
   };
 
